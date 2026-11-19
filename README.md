@@ -17,10 +17,10 @@ Requires Python 3.9+, no extra packages.
 ./gcp_spot.py -t highmem -s price              # only highmem, cheapest first
 ./gcp_spot.py --cpu 8 --mem 32                 # recommend cheapest with >= 8 vCPUs and >= 32 GiB
 ./gcp_spot.py --cpu 8 --mem 32 -t custom       # same, custom machine types only
-./gcp_spot.py --cpu 16 -f all -r all           # cheapest 16+ vCPU machine in any family/region
+./gcp_spot.py --cpu 16 -f all -r all           # cheapest 16+ vCPU machine in any pd-standard family/region
 ./gcp_spot.py --cpu 8 --mem 32 -f all -p       # include preemption risk (needs gcloud)
-./gcp_spot.py --cpu 8 -f all --no-hyperdisk --no-arm  # families that work with Batch defaults
-./gcp_spot.py --cpu 8 -f all --disk pd-standard        # families that can use pd-standard disks
+./gcp_spot.py --cpu 8 -f all --disk any        # also families without pd-standard (C3, N4, ...)
+./gcp_spot.py --cpu 8 -f all --disk pd-balanced --no-arm  # x86 families that work with Batch defaults
 ./gcp_spot.py --list-regions
 ./gcp_spot.py --list-families -r europe-north1
 ```
@@ -31,7 +31,7 @@ Requires Python 3.9+, no extra packages.
 | `-f, --family` | `n1,n2` | Comma-separated families (`n1,n2,e2,c3,...`), or `all` |
 | `-t, --type` | `standard,highmem,highcpu,custom` | Comma-separated types, or `all` (adds `megamem`, `standard-lssd`, ...) |
 | `--no-hyperdisk` | | Leave out families without Persistent Disk support (see below) |
-| `--disk TYPE` | | Only families that support boot disk `pd-standard`, `pd-balanced`, `pd-ssd` or `hyperdisk-balanced` |
+| `--disk TYPE` | `pd-standard` | Only families that support boot disk `pd-standard`, `pd-balanced`, `pd-ssd` or `hyperdisk-balanced`; `any` for all families |
 | `--no-arm` | | Leave out Arm families (C4A, N4A, T2A) |
 | `--cpu N` | | Minimum vCPUs |
 | `--mem GIB` | | Minimum memory in GiB |
@@ -57,12 +57,16 @@ The `Notes` column flags families that need extra setup in Google Batch:
   support. Batch's default `pd-balanced` boot disk won't work; set the boot disk
   type to `hyperdisk-balanced`.
 
-`--no-hyperdisk` and `--no-arm` leave these families out entirely, also from the
-"cheaper outside your selection" suggestion and from `--list-families`.
+By default only families that support `pd-standard` disks are shown, so Hyperdisk
+families only appear with `--disk any` or `--disk hyperdisk-balanced`. T2A (Arm)
+supports `pd-standard`; leave it out with `--no-arm`. `--no-hyperdisk` leaves out the
+Hyperdisk families even with `--disk any`. Filtered families are also left out of the
+"cheaper outside your selection" suggestion and `--list-families`.
 
-`--disk TYPE` keeps only families that can use that disk type, e.g. to use the cheaper
-(but slower, HDD-backed) `pd-standard` instead of Batch's default `pd-balanced`.
-Bootable disk types per family, from Google's machine family docs:
+`--disk TYPE` keeps only families that can use that disk type. The default is the
+cheaper (but slower, HDD-backed) `pd-standard`; every family that supports it also
+supports Batch's default `pd-balanced`. `--disk any` turns the filter off. Bootable disk
+types per family, from Google's machine family docs:
 
 | Disk type | Families |
 | --- | --- |
@@ -73,8 +77,8 @@ Bootable disk types per family, from Google's machine family docs:
 
 N1, N2, N2D, E2 and C2D support Hyperdisk Balanced only on request to Google's account
 team, so they are not listed for it. Families missing from this list (new ones) are
-left out by `--disk`. In Batch, set the type in `instancePolicy.bootDisk.type` (and
-`instancePolicy.disks[].newDisk.type` for extra disks).
+left out unless `--disk any` is given. In Batch, set the type in
+`instancePolicy.bootDisk.type` (and `instancePolicy.disks[].newDisk.type` for extra disks).
 
 ## Preemption risk (`-p`)
 

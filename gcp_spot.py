@@ -54,7 +54,8 @@ DISK_TYPES = {
     "h3": {"pd-balanced", "hyperdisk-balanced"},
     **dict.fromkeys(HYPERDISK_ONLY_FAMILIES, {"hyperdisk-balanced"}),
 }
-DISK_CHOICES = ["pd-standard", "pd-balanced", "pd-ssd", "hyperdisk-balanced"]
+DISK_CHOICES = ["pd-standard", "pd-balanced", "pd-ssd", "hyperdisk-balanced", "any"]
+DEFAULT_DISK = "pd-standard"
 NOTE_LEGEND = {
     "Arm": "Arm CPU; needs arm64 (or multi-arch) container images.",
     "Hyperdisk": "no Persistent Disk support; Google Batch's default pd-balanced boot disk "
@@ -603,9 +604,11 @@ def parse_args(argv=None) -> argparse.Namespace:
             "  %(prog)s --cpu 16 -f all -r all       cheapest machine with >= 16 vCPUs anywhere\n"
             "  %(prog)s -f n2,n4,t2d -s core         compare price per physical core\n"
             "  %(prog)s --cpu 8 -f all -p            include preemption risk (needs gcloud)\n"
-            "  %(prog)s --cpu 8 -f all --no-hyperdisk --no-arm\n"
-            "                                           any family that works with Google Batch defaults\n"
+            "  %(prog)s --cpu 8 -f all --disk any    also families without pd-standard (C3, N4, ...)\n"
             "  %(prog)s --list-families              show available families and types\n"
+            "\n"
+            f"Only families that support {DEFAULT_DISK} disks are shown by default; --disk any shows\n"
+            "all families.\n"
             "\n"
             "Most families count each hyperthread as a vCPU (2 vCPUs = 1 core); T2D, T2A, C4A,\n"
             "N4A and H3 have one vCPU per physical core. USD/core/hour compares them fairly.\n"
@@ -625,9 +628,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--no-hyperdisk", action="store_true",
                    help="leave out families without Persistent Disk support (N4, C4, ...), which need a "
                         "hyperdisk-balanced boot disk in Google Batch")
-    p.add_argument("--disk", choices=DISK_CHOICES, type=str.lower,
-                   help="only families that support this boot disk type, e.g. pd-standard "
-                        "(Google Batch's default is pd-balanced)")
+    p.add_argument("--disk", choices=DISK_CHOICES, type=str.lower, default=DEFAULT_DISK,
+                   help="only families that support this boot disk type, or 'any' "
+                        f"(default: {DEFAULT_DISK}; Google Batch's default is pd-balanced)")
     p.add_argument("--no-arm", action="store_true",
                    help="leave out Arm families (C4A, N4A, T2A), which need arm64 container images")
     p.add_argument("--cpu", type=int, metavar="N", help="minimum number of vCPUs needed")
@@ -647,6 +650,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if args.sort == "est" and not args.preemption:
         p.error("--sort est requires --preemption")
+    if args.disk == "any":
+        args.disk = None
     return args
 
 
@@ -692,6 +697,8 @@ def main(argv=None) -> int:
         ]
         print_table(["Family", "Types", "1 vCPU =", "Notes"], rows, "llll")
         print_legend({note for family in types_by_family for note in family_notes(family)})
+        if args.disk:
+            print(f"\nOnly families that support {args.disk} disks are listed; --disk any lists all.")
         return 0
 
     families = None if "all" in args.family else args.family
@@ -712,7 +719,8 @@ def main(argv=None) -> int:
         f in CUSTOM_LIMITS and (families is None or f in families) for r in scope for f in custom_rates.get(r, {})
     )
     if not selected and not has_custom_rates:
-        sys.exit("error: no machine types match the selected region/families/types; see --list-families")
+        hint = f" (only families that support {args.disk} disks; --disk any for all)" if args.disk else ""
+        sys.exit(f"error: no machine types match the selected region/families/types{hint}; see --list-families")
 
     candidates = [m for m in selected if meets_requirements(m)]
 
@@ -767,7 +775,8 @@ def main(argv=None) -> int:
 
     fetched = datetime.fromtimestamp(data["fetched"]).strftime("%Y-%m-%d %H:%M")
     where = "all regions" if all_regions else regions[region]
-    print(f"Spot VM prices, {where} (fetched {fetched})\n")
+    disk = f", families with {args.disk} support" if args.disk else ""
+    print(f"Spot VM prices, {where}{disk} (fetched {fetched})\n")
 
     notes_shown = set()
     if candidates:
