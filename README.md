@@ -20,6 +20,7 @@ Requires Python 3.9+, no extra packages.
 ./gcp_spot.py --cpu 16 -f all -r all           # cheapest 16+ vCPU machine in any family/region
 ./gcp_spot.py --cpu 8 --mem 32 -f all -p       # include preemption risk (needs gcloud)
 ./gcp_spot.py --cpu 8 -f all --no-hyperdisk --no-arm  # families that work with Batch defaults
+./gcp_spot.py --cpu 8 -f all --disk pd-standard        # families that can use pd-standard disks
 ./gcp_spot.py --list-regions
 ./gcp_spot.py --list-families -r europe-north1
 ```
@@ -30,6 +31,7 @@ Requires Python 3.9+, no extra packages.
 | `-f, --family` | `n1,n2` | Comma-separated families (`n1,n2,e2,c3,...`), or `all` |
 | `-t, --type` | `standard,highmem,highcpu,custom` | Comma-separated types, or `all` (adds `megamem`, `standard-lssd`, ...) |
 | `--no-hyperdisk` | | Leave out families without Persistent Disk support (see below) |
+| `--disk TYPE` | | Only families that support boot disk `pd-standard`, `pd-balanced`, `pd-ssd` or `hyperdisk-balanced` |
 | `--no-arm` | | Leave out Arm families (C4A, N4A, T2A) |
 | `--cpu N` | | Minimum vCPUs |
 | `--mem GIB` | | Minimum memory in GiB |
@@ -57,6 +59,22 @@ The `Notes` column flags families that need extra setup in Google Batch:
 
 `--no-hyperdisk` and `--no-arm` leave these families out entirely, also from the
 "cheaper outside your selection" suggestion and from `--list-families`.
+
+`--disk TYPE` keeps only families that can use that disk type, e.g. to use the cheaper
+(but slower, HDD-backed) `pd-standard` instead of Batch's default `pd-balanced`.
+Bootable disk types per family, from Google's machine family docs:
+
+| Disk type | Families |
+| --- | --- |
+| `pd-standard` | N1, N2, N2D, E2, C2, C2D, T2D, T2A |
+| `pd-balanced` | the above, plus C3, H3, M1, M2, M3, Z3 |
+| `pd-ssd` | as `pd-balanced`, except H3 |
+| `hyperdisk-balanced` | C3, H3, M1, M2, M3, Z3 and the Hyperdisk-only families |
+
+N1, N2, N2D, E2 and C2D support Hyperdisk Balanced only on request to Google's account
+team, so they are not listed for it. Families missing from this list (new ones) are
+left out by `--disk`. In Batch, set the type in `instancePolicy.bootDisk.type` (and
+`instancePolicy.disks[].newDisk.type` for extra disks).
 
 ## Preemption risk (`-p`)
 

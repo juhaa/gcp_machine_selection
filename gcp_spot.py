@@ -45,6 +45,16 @@ ARM_FAMILIES = {"c4a", "n4a", "t2a"}
 NO_SMT_FAMILIES = {"c4a", "h3", "n4a", "t2a", "t2d"}
 # Families that can't use Persistent Disk (pd-*) and need Hyperdisk instead.
 HYPERDISK_ONLY_FAMILIES = {"c4", "c4a", "c4d", "c4n", "m4", "n4", "n4a", "n4d", "z4d", "z4m"}
+# Bootable disk types per family, from the "Supported disk types" sections of the machine
+# family docs. N1, N2, N2D, E2 and C2D list Hyperdisk Balanced only on request to Google's
+# account team, so it is left out for them.
+DISK_TYPES = {
+    **dict.fromkeys(["c2", "c2d", "e2", "n1", "n2", "n2d", "t2a", "t2d"], {"pd-standard", "pd-balanced", "pd-ssd"}),
+    **dict.fromkeys(["c3", "m1", "m2", "m3", "z3"], {"pd-balanced", "pd-ssd", "hyperdisk-balanced"}),
+    "h3": {"pd-balanced", "hyperdisk-balanced"},
+    **dict.fromkeys(HYPERDISK_ONLY_FAMILIES, {"hyperdisk-balanced"}),
+}
+DISK_CHOICES = ["pd-standard", "pd-balanced", "pd-ssd", "hyperdisk-balanced"]
 NOTE_LEGEND = {
     "Arm": "Arm CPU; needs arm64 (or multi-arch) container images.",
     "Hyperdisk": "no Persistent Disk support; Google Batch's default pd-balanced boot disk "
@@ -615,6 +625,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--no-hyperdisk", action="store_true",
                    help="leave out families without Persistent Disk support (N4, C4, ...), which need a "
                         "hyperdisk-balanced boot disk in Google Batch")
+    p.add_argument("--disk", choices=DISK_CHOICES, type=str.lower,
+                   help="only families that support this boot disk type, e.g. pd-standard "
+                        "(Google Batch's default is pd-balanced)")
     p.add_argument("--no-arm", action="store_true",
                    help="leave out Arm families (C4A, N4A, T2A), which need arm64 container images")
     p.add_argument("--cpu", type=int, metavar="N", help="minimum number of vCPUs needed")
@@ -644,7 +657,8 @@ def main(argv=None) -> int:
 
     def family_allowed(family):
         hyperdisk_only = args.no_hyperdisk and family in HYPERDISK_ONLY_FAMILIES
-        return not hyperdisk_only and not (args.no_arm and family in ARM_FAMILIES)
+        unsupported_disk = args.disk and args.disk not in DISK_TYPES.get(family, ())
+        return not hyperdisk_only and not unsupported_disk and not (args.no_arm and family in ARM_FAMILIES)
 
     custom_rates = {
         r: {family: rates for family, rates in by_family.items() if family_allowed(family)}
