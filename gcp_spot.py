@@ -593,6 +593,8 @@ def parse_args(argv=None) -> argparse.Namespace:
             "  %(prog)s --cpu 16 -f all -r all       cheapest machine with >= 16 vCPUs anywhere\n"
             "  %(prog)s -f n2,n4,t2d -s core         compare price per physical core\n"
             "  %(prog)s --cpu 8 -f all -p            include preemption risk (needs gcloud)\n"
+            "  %(prog)s --cpu 8 -f all --no-hyperdisk --no-arm\n"
+            "                                           any family that works with Google Batch defaults\n"
             "  %(prog)s --list-families              show available families and types\n"
             "\n"
             "Most families count each hyperthread as a vCPU (2 vCPUs = 1 core); T2D, T2A, C4A,\n"
@@ -610,6 +612,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help=f"comma-separated machine families, or 'all' (default: {','.join(DEFAULT_FAMILIES)})")
     p.add_argument("-t", "--type", type=comma_list, default=DEFAULT_TYPES,
                    help=f"comma-separated machine types, or 'all' (default: {','.join(DEFAULT_TYPES)})")
+    p.add_argument("--no-hyperdisk", action="store_true",
+                   help="leave out families without Persistent Disk support (N4, C4, ...), which need a "
+                        "hyperdisk-balanced boot disk in Google Batch")
+    p.add_argument("--no-arm", action="store_true",
+                   help="leave out Arm families (C4A, N4A, T2A), which need arm64 container images")
     p.add_argument("--cpu", type=int, metavar="N", help="minimum number of vCPUs needed")
     p.add_argument("--mem", type=float, metavar="GIB", help="minimum memory needed, in GiB")
     p.add_argument("-p", "--preemption", action="store_true",
@@ -634,7 +641,15 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     data = load_prices(args.refresh)
     regions = data["regions"]
-    custom_rates = data["custom"]
+
+    def family_allowed(family):
+        hyperdisk_only = args.no_hyperdisk and family in HYPERDISK_ONLY_FAMILIES
+        return not hyperdisk_only and not (args.no_arm and family in ARM_FAMILIES)
+
+    custom_rates = {
+        r: {family: rates for family, rates in by_family.items() if family_allowed(family)}
+        for r, by_family in data["custom"].items()
+    }
 
     if args.list_regions:
         for code in sorted(regions):
@@ -646,7 +661,7 @@ def main(argv=None) -> int:
     if not all_regions and region not in regions:
         sys.exit(f"error: unknown region '{args.region}'; see --list-regions")
     scope = sorted(regions) if all_regions else [region]
-    in_region = [m for m in data["machines"] if m["region"] in scope]
+    in_region = [m for m in data["machines"] if m["region"] in scope and family_allowed(m["family"])]
 
     if args.list_families:
         types_by_family = {}

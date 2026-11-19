@@ -19,6 +19,7 @@ Requires Python 3.9+, no extra packages.
 ./gcp_spot.py --cpu 8 --mem 32 -t custom       # same, custom machine types only
 ./gcp_spot.py --cpu 16 -f all -r all           # cheapest 16+ vCPU machine in any family/region
 ./gcp_spot.py --cpu 8 --mem 32 -f all -p       # include preemption risk (needs gcloud)
+./gcp_spot.py --cpu 8 -f all --no-hyperdisk --no-arm  # families that work with Batch defaults
 ./gcp_spot.py --list-regions
 ./gcp_spot.py --list-families -r europe-north1
 ```
@@ -28,6 +29,8 @@ Requires Python 3.9+, no extra packages.
 | `-r, --region` | `europe-west1` | Region code, or `all` |
 | `-f, --family` | `n1,n2` | Comma-separated families (`n1,n2,e2,c3,...`), or `all` |
 | `-t, --type` | `standard,highmem,highcpu,custom` | Comma-separated types, or `all` (adds `megamem`, `standard-lssd`, ...) |
+| `--no-hyperdisk` | | Leave out families without Persistent Disk support (see below) |
+| `--no-arm` | | Leave out Arm families (C4A, N4A, T2A) |
 | `--cpu N` | | Minimum vCPUs |
 | `--mem GIB` | | Minimum memory in GiB |
 | `-p, --preemption` | | Fetch preemption history with gcloud and rank by estimated price including reruns |
@@ -51,6 +54,9 @@ The `Notes` column flags families that need extra setup in Google Batch:
 - `Hyperdisk` (N4, N4D, N4A, C4, C4D, C4A, C4N, M4, Z4M, Z4D): no Persistent Disk
   support. Batch's default `pd-balanced` boot disk won't work; set the boot disk
   type to `hyperdisk-balanced`.
+
+`--no-hyperdisk` and `--no-arm` leave these families out entirely, also from the
+"cheaper outside your selection" suggestion and from `--list-families`.
 
 ## Preemption risk (`-p`)
 
