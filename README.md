@@ -31,7 +31,7 @@ Requires Python 3.9+, no extra packages.
 | `--cpu N` | | Minimum vCPUs |
 | `--mem GIB` | | Minimum memory in GiB |
 | `-p, --preemption` | | Fetch preemption history with gcloud and rank by estimated price including reruns |
-| `-s, --sort` | `est` with `-p` and `--cpu/--mem`, `price` with `--cpu/--mem`, else `name` | Sort by `name`, hourly `price`, price per physical `core`, or estimated price `est` (needs `-p`) |
+| `-s, --sort` | `price` with `--cpu/--mem`, else `name` | Sort by `name`, hourly `price`, price per physical `core`, or estimated price `est` (needs `-p`) |
 | `-n, --limit` | 10 with `--cpu/--mem`, else all | Max rows shown |
 | `--refresh` | | Ignore caches |
 
@@ -70,8 +70,9 @@ for the candidates (8 in parallel, results cached for 24 hours in
   preemption rather than by their owner, averaged over the days with data in the last
   ~30 days and the last 7 days.
 - `Days`: days with data. Days with too little usage are missing; machines with fewer
-  than 7 days are not recommended. Custom machine types usually have no daily data
-  (the API returns one 30-day entry, which is ignored).
+  than 7 days are not recommended. Custom machine types are listed but not checked
+  (the API has no daily data for them, only one 30-day entry), so their preemption
+  columns show `-`.
 - `Est. USD/hour`: hourly price × (1 + p / (2 × (1 − p))), the expected cost if each run
   is preempted with probability p and a preempted run loses half its work before being
   rerun. This is a rough model: the rate depends on how long other people's VMs run, not
@@ -80,8 +81,9 @@ for the candidates (8 in parallel, results cached for 24 hours in
 
 With `--cpu`/`--mem` the tool checks candidates in order of hourly price and stops once no
 unchecked machine can beat the best estimate (the estimate is never below the hourly
-price), at most 60 gcloud calls per run. It prints both the cheapest machine per hour and
-the cheapest including preemption risk.
+price), at most 60 gcloud calls per run. The table is sorted by hourly price (`-s est` sorts
+by the estimate instead). It prints both the cheapest machine per hour and the cheapest
+including preemption risk.
 
 Requirements: the gcloud `beta` component (`gcloud components install beta`) and an
 authenticated account. Queries use gcloud's default project; set another one with

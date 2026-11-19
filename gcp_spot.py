@@ -55,8 +55,8 @@ PREEMPTION_LEGEND = (
     "  by their owner, averaged over the days with data in the last ~30 days (and last 7 days).\n"
     "Est. USD/hour: hourly price plus the expected cost of rerunning preempted work, assuming each\n"
     "  run is preempted with that probability and loses half a run: price * (1 + p / (2 * (1 - p))).\n"
-    f"  Machines with fewer than {PREEMPTION_MIN_DAYS} days of data aren't recommended; custom machine\n"
-    "  types usually have none."
+    f"  Machines with fewer than {PREEMPTION_MIN_DAYS} days of data aren't recommended. Custom machine\n"
+    "  types aren't checked: the API has no daily history for them."
 )
 
 # Custom machine type limits, from
@@ -492,7 +492,7 @@ def describe(m: dict, show_region: bool) -> str:
                 f"est. ${effective_price(m):.6f}/hour with reruns"
             )
         else:
-            text += "\n    no preemption data"
+            text += "\n    no preemption data" + (" for custom machine types" if m["type"] == "custom" else "")
     return text
 
 
@@ -539,7 +539,7 @@ def print_machines(machines: list[dict], show_region: bool) -> set[str]:
             else:
                 preempted = f"{stats['rate']:.0%}" if stats["rate"] is not None else "-"
                 recent = f"{stats['rate_7d']:.0%}" if stats["rate_7d"] is not None else "-"
-                days = str(stats["days"])
+                days = str(stats["days"]) if stats["days"] else "-"
                 estimate = f"{effective_price(m):.6f}" if stats["rate"] is not None else "-"
         rows.append([
             m["region"] if show_region else "", m["name"], str(m["vcpus"]), f"{cores(m):g}", f"{m['memory']:g}",
@@ -616,8 +616,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="fetch historical preemption rates with gcloud and estimate the price including reruns")
     p.add_argument("-s", "--sort", choices=["name", "price", "core", "est"],
                    help="sort by name, hourly price, price per physical core, or estimated price including "
-                        "preemption (default: est with --preemption and --cpu/--mem, price with --cpu/--mem, "
-                        "otherwise name)")
+                        "preemption (default: price with --cpu/--mem, otherwise name)")
     p.add_argument("-n", "--limit", type=int,
                    help="max rows to show (default: 10 with --cpu/--mem, otherwise all)")
     p.add_argument("--refresh", action="store_true",
@@ -706,7 +705,7 @@ def main(argv=None) -> int:
         return (estimate if estimate is not None else math.inf,) + price_key(m)
 
     sort_keys = {"name": name_key, "price": price_key, "core": core_price_key, "est": est_key}
-    sort = args.sort or (("est" if args.preemption else "price") if requirements else "name")
+    sort = args.sort or ("price" if requirements else "name")
     limit = args.limit if args.limit is not None else (10 if requirements else None)
 
     unchecked, hidden = [], []
@@ -715,9 +714,16 @@ def main(argv=None) -> int:
         preemption_cache = {} if args.refresh else load_preemption_cache()
         if requirements:
             # Check machines in order of hourly price, only as far as one could still win.
+            # Custom machine types are listed without a check: the API has no daily history for them.
             candidates.sort(key=price_key)
-            checked, best_estimate = check_preemption(candidates, limit, preemption_cache)
-            candidates, unchecked = candidates[:checked], candidates[checked:]
+            predefined = [m for m in candidates if m["type"] != "custom"]
+            checked, best_estimate = check_preemption(predefined, limit, preemption_cache)
+            unchecked = predefined[checked:]
+            skipped = {id(m) for m in unchecked}
+            candidates = [m for m in candidates if id(m) not in skipped]
+            for m in candidates:
+                if m["type"] == "custom":
+                    m["preemption"] = preemption_stats([])
         else:
             candidates.sort(key=name_key if sort == "est" else sort_keys[sort])
             hidden = candidates[limit:] if limit is not None else []
