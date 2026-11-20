@@ -19,6 +19,7 @@ Requires Python 3.9+, no extra packages.
 ./gcp_spot.py --cpu 8 --mem 32 -t custom       # same, custom machine types only
 ./gcp_spot.py --cpu 16 -f all -r all           # cheapest 16+ vCPU machine in any pd-standard family/region
 ./gcp_spot.py --cpu 8 --mem 32 -f all -p       # include preemption risk (needs gcloud)
+./gcp_spot.py --cpu 8 --mem 32 -f all --linear 32  # job runs faster on more cores: cheapest per run
 ./gcp_spot.py --cpu 8 -f all --disk any        # also families without pd-standard (C3, N4, ...)
 ./gcp_spot.py --cpu 8 -f all --disk pd-balanced  # families that work with Batch defaults
 ./gcp_spot.py --cpu 8 -f all --arm             # include Arm families
@@ -37,7 +38,8 @@ Requires Python 3.9+, no extra packages.
 | `--cpu N` | | Minimum vCPUs |
 | `--mem GIB` | | Minimum memory in GiB |
 | `-p, --preemption` | | Fetch preemption history with gcloud and rank by estimated price including reruns |
-| `-s, --sort` | `price` with `--cpu/--mem`, else `name` | Sort by `name`, hourly `price`, price per physical `core`, or estimated price `est` (needs `-p`) |
+| `--linear [MAX]` | MAX 64 | Runtime scales linearly with physical cores: rank machines with `--cpu` to MAX vCPUs by price per run |
+| `-s, --sort` | `run` with `--linear`, `price` with `--cpu/--mem`, else `name` | Sort by `name`, hourly `price`, price per physical `core`, price per `run` (needs `--linear`), or estimated price `est` (needs `-p`) |
 | `-n, --limit` | 10 with `--cpu/--mem`, else all | Max rows shown |
 | `--refresh` | | Ignore caches |
 
@@ -80,6 +82,37 @@ N1, N2, N2D, E2 and C2D support Hyperdisk Balanced only on request to Google's a
 team, so they are not listed for it. Families missing from this list (new ones) are
 left out unless `--disk any` is given. In Batch, set the type in
 `instancePolicy.bootDisk.type` (and `instancePolicy.disks[].newDisk.type` for extra disks).
+
+## Linear scaling (`--linear`)
+
+If a job's runtime scales linearly with the number of physical cores, a bigger machine can
+be cheaper per run even though it costs more per hour. With `--linear MAX`, `--cpu N` is the
+reference size and the minimum, machines with up to MAX vCPUs (default 64) are considered,
+and they are ranked by `USD/run-hour`: the price of the work that takes one hour on N vCPUs
+with hyperthreading (N/2 physical cores), i.e. `USD/hour × (N/2) / cores`. `--mem` stays the
+total memory needed. For custom types, the tool also picks the shape with the lowest price
+per core.
+
+```
+./gcp_spot.py --cpu 8 --mem 32 -f all --linear
+Cheapest machine with >= 8 vCPUs and >= 32 GiB memory:
+  c2d-standard-8: 8 vCPUs (4 cores), 32 GiB, $0.055632/hour (... $0.055632/run-hour)
+
+Cheapest per run, if the runtime scales linearly with cores up to 64 vCPUs:
+  c2d-highcpu-16: 16 vCPUs (8 cores), 32 GiB, $0.091872/hour (... $0.045936/run-hour)
+    2x the cores of c2d-standard-8 at 1.65x the hourly price: 17% cheaper per run
+```
+
+Within one family and type the price per core is the same for every size, so the gain comes
+from other types (highcpu meets `--mem` at a bigger size), families without hyperthreading,
+and different Spot prices and preemption rates between sizes. Ties go to the smaller machine.
+With `-p`, machines are also ranked by estimated price per run including reruns.
+
+Scaling is by physical cores, not vCPUs: a hyperthread adds much less than a core, so this
+errs on the cautious side for families with hyperthreading. Not modelled: per-core speed
+differences between families and CPU generations, and fixed overhead per run (VM start,
+image pull, data download), which makes short jobs on big machines less efficient. Choose
+MAX at or below the point where your job stops scaling.
 
 ## Preemption risk (`-p`)
 

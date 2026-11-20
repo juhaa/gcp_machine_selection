@@ -69,6 +69,12 @@ PREEMPTION_LEGEND = (
     f"  Machines with fewer than {PREEMPTION_MIN_DAYS} days of data aren't recommended. Custom machine\n"
     "  types aren't checked: the API has no daily history for them."
 )
+DEFAULT_LINEAR_MAX = 64
+LINEAR_LEGEND = (
+    "USD/run-hour: price of the work that takes one hour on {cpu} vCPUs with hyperthreading ({ref:g} physical\n"
+    "  cores), assuming the runtime scales linearly with physical cores: USD/hour * {ref:g} / cores.\n"
+    "  Per-core speed differences between families and fixed overheads per run are not included."
+)
 
 # Custom machine type limits, from
 # https://cloud.google.com/compute/docs/instances/creating-instance-with-custom-machine-type
@@ -259,16 +265,21 @@ def round_up(value: float, step: float) -> float:
     return math.ceil(value / step - 1e-9) * step
 
 
-def cheapest_custom(region: str, family: str, rates: dict, cpu: int | None, mem: float | None) -> dict | None:
-    """Cheapest valid custom machine of a family with >= cpu vCPUs and >= mem GiB, or None."""
+def cheapest_custom(region: str, family: str, rates: dict, cpu: int | None, mem: float | None,
+                    max_cpu: int | None = None, per_vcpu: bool = False) -> dict | None:
+    """Cheapest valid custom machine of a family with cpu..max_cpu vCPUs and >= mem GiB, or None.
+
+    With per_vcpu, the one with the lowest price per vCPU (the smallest of equals), i.e. per
+    physical core within a family, for jobs whose runtime scales linearly with cores.
+    """
     limits = CUSTOM_LIMITS.get(family)
     if not limits or "vcpu" not in rates or "memory" not in rates:
         return None
     min_ratio, max_ratio = limits["mem_per_vcpu"]
     extended_rate = rates.get("extended")
-    best = None
+    best, best_cost = None, math.inf
     for vcpus in limits["vcpus"]:
-        if cpu is not None and vcpus < cpu:
+        if cpu is not None and vcpus < cpu or max_cpu is not None and vcpus > max_cpu:
             continue
         # N1 needs at least 1 GiB per vCPU with 1 or 2 vCPUs.
         ratio = 1.0 if family == "n1" and vcpus <= 2 else min_ratio
@@ -278,7 +289,9 @@ def cheapest_custom(region: str, family: str, rates: dict, cpu: int | None, mem:
         if extended and (extended_rate is None or memory > limits["max_memory"]):
             continue
         hourly = vcpus * rates["vcpu"] + base * rates["memory"] + extended * (extended_rate or 0)
-        if best is None or hourly < best["hourly"]:
+        cost = hourly / vcpus if per_vcpu else hourly
+        if cost < best_cost * (1 - 1e-9):  # ignore rounding noise, keep the smaller shape
+            best_cost = cost
             # gcloud machine type name; N1 custom types have no series prefix.
             prefix = "" if family == "n1" else f"{family}-"
             best = {
@@ -294,14 +307,17 @@ def cheapest_custom(region: str, family: str, rates: dict, cpu: int | None, mem:
     return best
 
 
-def custom_options(custom_rates: dict, regions: list[str], cpu: int | None, mem: float | None) -> list[dict]:
-    """Cheapest custom machine per family and region meeting the requirements."""
+def custom_options(custom_rates: dict, regions: list[str], cpu: int | None, mem: float | None,
+                   max_cpu: int | None = None, linear: bool = False) -> list[dict]:
+    """Cheapest custom machine per family and region meeting the requirements; with linear, also
+    the cheapest per core if that is a different shape."""
     options = []
     for region in regions:
         for family, rates in custom_rates.get(region, {}).items():
-            best = cheapest_custom(region, family, rates, cpu, mem)
-            if best:
-                options.append(best)
+            shapes = [cheapest_custom(region, family, rates, cpu, mem, max_cpu)]
+            if linear:
+                shapes.append(cheapest_custom(region, family, rates, cpu, mem, max_cpu, per_vcpu=True))
+            options += {shape["name"]: shape for shape in shapes if shape}.values()
     return options
 
 
@@ -437,9 +453,11 @@ def effective_price(m: dict) -> float | None:
     return math.inf if p >= 1 else m["hourly"] * (1 + p / (2 * (1 - p)))
 
 
-def check_preemption(by_price: list[dict], min_rows: int, cache: dict) -> tuple[int, float]:
-    """Fetch preemption data for candidates in order of hourly price until no unchecked one can
-    beat the best estimated price (the estimate is never below the hourly price).
+def check_preemption(by_price: list[dict], min_rows: int, cache: dict,
+                     ref_cores: float | None = None) -> tuple[int, float]:
+    """Fetch preemption data for candidates in order of price until no unchecked one can beat
+    the best estimated price (the estimate is never below the price). Prices are per run-hour
+    with ref_cores (see run_price), otherwise per hour.
 
     Returns how many candidates were checked and the best estimated price among those with data.
     """
@@ -447,7 +465,8 @@ def check_preemption(by_price: list[dict], min_rows: int, cache: dict) -> tuple[
     failures, any_success = [], False
     single_region = len({m["region"] for m in by_price}) == 1
     while checked < min(len(by_price), MAX_PREEMPTION_QUERIES):
-        if checked >= min_rows and by_price[checked]["hourly"] >= best:
+        m = by_price[checked]
+        if checked >= min_rows and run_price(m, m["hourly"], ref_cores) >= best:
             break
         batch = by_price[checked:min(checked + GCLOUD_WORKERS, MAX_PREEMPTION_QUERIES)]
         batch_failures = fetch_preemption(batch, cache)
@@ -455,7 +474,7 @@ def check_preemption(by_price: list[dict], min_rows: int, cache: dict) -> tuple[
         any_success = any_success or len(batch_failures) < len(batch)
         exit_if_setup_problem(failures, any_success, single_region)
         checked += len(batch)
-        best = min([best] + [effective_price(m) for m in batch if has_preemption_data(m)])
+        best = min([best] + [run_price(m, effective_price(m), ref_cores) for m in batch if has_preemption_data(m)])
     return checked, best
 
 
@@ -474,6 +493,12 @@ def core_price(m: dict) -> float:
     return m["hourly"] / cores(m)
 
 
+def run_price(m: dict, price: float, ref_cores: float | None) -> float:
+    """Price of the work that takes an hour on ref_cores physical cores, for a job whose runtime
+    scales linearly with cores (--linear). Without ref_cores, the price itself."""
+    return price * ref_cores / cores(m) if ref_cores else price
+
+
 def family_notes(family: str) -> list[str]:
     notes = []
     if family in ARM_FAMILIES:
@@ -483,14 +508,16 @@ def family_notes(family: str) -> list[str]:
     return notes
 
 
-def describe(m: dict, show_region: bool) -> str:
+def describe(m: dict, show_region: bool, ref_cores: float | None = None) -> str:
     notes = family_notes(m["family"])
     tags = f" [{', '.join(notes)}]" if notes else ""
     where = f" in {m['region']}" if show_region else ""
     extended = f" incl. {m['extended']:g} GiB extended" if m.get("extended") else ""
+    per_run = f", ${run_price(m, m['hourly'], ref_cores):.6f}/run-hour" if ref_cores else ""
     text = (
         f"{m['name']}{tags}{where}: {m['vcpus']} vCPUs ({cores(m):g} cores), {m['memory']:g} GiB{extended}, "
-        f"${m['hourly']:.6f}/hour (${m['hourly'] * HOURS_PER_MONTH:.2f}/month, ${core_price(m):.6f}/core/hour)"
+        f"${m['hourly']:.6f}/hour (${m['hourly'] * HOURS_PER_MONTH:.2f}/month, ${core_price(m):.6f}/core/hour"
+        f"{per_run})"
     )
     if "preemption" in m:
         stats = m["preemption"]
@@ -500,7 +527,8 @@ def describe(m: dict, show_region: bool) -> str:
             recent = f", last 7 days {stats['rate_7d']:.0%}" if stats["rate_7d"] is not None else ""
             text += (
                 f"\n    preempted {stats['rate']:.0%} ({stats['days']} days of data{recent}), "
-                f"est. ${effective_price(m):.6f}/hour with reruns"
+                f"est. ${run_price(m, effective_price(m), ref_cores):.6f}/{'run-' if ref_cores else ''}hour "
+                "with reruns"
             )
         else:
             text += "\n    no preemption data" + (" for custom machine types" if m["type"] == "custom" else "")
@@ -533,10 +561,15 @@ def print_legend(notes: set[str]) -> None:
             print(f"{note}: {NOTE_LEGEND[note]}")
 
 
-def print_machines(machines: list[dict], show_region: bool) -> set[str]:
-    """Print the machine table and return the notes shown in it."""
-    headers = ["Region", "Machine type", "vCPUs", "Cores", "Memory (GiB)", "USD/hour", "USD/month",
-               "USD/core/hour", "Preempted", "7 days", "Days", "Est. USD/hour", "Notes"]
+def print_machines(machines: list[dict], show_region: bool, ref_cores: float | None = None) -> set[str]:
+    """Print the machine table and return the notes shown in it.
+
+    With ref_cores (--linear), prices per run-hour replace the monthly and per-core prices.
+    """
+    linear = ref_cores is not None
+    headers = ["Region", "Machine type", "vCPUs", "Cores", "Memory (GiB)", "USD/hour",
+               "USD/run-hour" if linear else "USD/month", "USD/core/hour", "Preempted", "7 days", "Days",
+               "Est. USD/run-hour" if linear else "Est. USD/hour", "Notes"]
     rows, notes_shown = [], set()
     for m in machines:
         notes = family_notes(m["family"])
@@ -551,10 +584,12 @@ def print_machines(machines: list[dict], show_region: bool) -> set[str]:
                 preempted = f"{stats['rate']:.0%}" if stats["rate"] is not None else "-"
                 recent = f"{stats['rate_7d']:.0%}" if stats["rate_7d"] is not None else "-"
                 days = str(stats["days"]) if stats["days"] else "-"
-                estimate = f"{effective_price(m):.6f}" if stats["rate"] is not None else "-"
+                estimate = f"{run_price(m, effective_price(m), ref_cores):.6f}" if stats["rate"] is not None else "-"
         rows.append([
             m["region"] if show_region else "", m["name"], str(m["vcpus"]), f"{cores(m):g}", f"{m['memory']:g}",
-            f"{m['hourly']:.6f}", f"{m['hourly'] * HOURS_PER_MONTH:.2f}", f"{core_price(m):.6f}",
+            f"{m['hourly']:.6f}",
+            f"{run_price(m, m['hourly'], ref_cores):.6f}" if linear else f"{m['hourly'] * HOURS_PER_MONTH:.2f}",
+            "" if linear else f"{core_price(m):.6f}",  # empty columns are left out
             preempted, recent, days, estimate, ", ".join(notes),
         ])
     print_table(headers, rows, "llrrrrrrrrrrl")
@@ -605,6 +640,7 @@ def parse_args(argv=None) -> argparse.Namespace:
             "  %(prog)s -f n2,n4,t2d -s core         compare price per physical core\n"
             "  %(prog)s --cpu 8 -f all -p            include preemption risk (needs gcloud)\n"
             "  %(prog)s --cpu 8 -f all --disk any    also families without pd-standard (C3, N4, ...)\n"
+            "  %(prog)s --cpu 8 -f all --linear 32   cheapest per run if the job scales with cores\n"
             "  %(prog)s --list-families              show available families and types\n"
             "\n"
             f"By default only x86 families that support {DEFAULT_DISK} disks are shown; --disk any\n"
@@ -638,9 +674,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--mem", type=float, metavar="GIB", help="minimum memory needed, in GiB")
     p.add_argument("-p", "--preemption", action="store_true",
                    help="fetch historical preemption rates with gcloud and estimate the price including reruns")
-    p.add_argument("-s", "--sort", choices=["name", "price", "core", "est"],
-                   help="sort by name, hourly price, price per physical core, or estimated price including "
-                        "preemption (default: price with --cpu/--mem, otherwise name)")
+    p.add_argument("--linear", type=int, nargs="?", const=DEFAULT_LINEAR_MAX, metavar="MAX",
+                   help="the job's runtime scales linearly with physical cores: consider machines with "
+                        f"--cpu to MAX vCPUs (default: {DEFAULT_LINEAR_MAX}) and rank them by price per run "
+                        "instead of per hour")
+    p.add_argument("-s", "--sort", choices=["name", "price", "core", "run", "est"],
+                   help="sort by name, hourly price, price per physical core, price per run (--linear), or "
+                        "estimated price including preemption (default: run with --linear, price with "
+                        "--cpu/--mem, otherwise name)")
     p.add_argument("-n", "--limit", type=int,
                    help="max rows to show (default: 10 with --cpu/--mem, otherwise all)")
     p.add_argument("--refresh", action="store_true",
@@ -651,6 +692,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if args.sort == "est" and not args.preemption:
         p.error("--sort est requires --preemption")
+    if args.linear is not None and args.cpu is None:
+        p.error("--linear requires --cpu (the vCPU count the runtime is relative to)")
+    if args.linear is not None and args.linear < args.cpu:
+        p.error("--linear MAX must be at least --cpu")
+    if args.sort == "run" and args.linear is None:
+        p.error("--sort run requires --linear")
     if args.disk == "any":
         args.disk = None
     return args
@@ -715,15 +762,20 @@ def main(argv=None) -> int:
     types = None if "all" in args.type else args.type
     show_custom = types is None or "custom" in types
     requirements = args.cpu is not None or args.mem is not None
+    linear = args.linear is not None
+    # With --linear, prices are compared per run: --cpu vCPUs on a machine with hyperthreading.
+    ref_cores = args.cpu / 2 if linear else None
 
     def is_selected(m):
         return (families is None or m["family"] in families) and (types is None or m["type"] in types)
 
     def meets_requirements(m):
-        return (args.cpu is None or m["vcpus"] >= args.cpu) and (args.mem is None or m["memory"] >= args.mem)
+        return ((args.cpu is None or m["vcpus"] >= args.cpu) and (args.mem is None or m["memory"] >= args.mem)
+                and (not linear or m["vcpus"] <= args.linear))
 
     # Custom machine types can only be sized once requirements are known.
-    options = in_region + (custom_options(custom_rates, scope, args.cpu, args.mem) if requirements else [])
+    options = in_region + (
+        custom_options(custom_rates, scope, args.cpu, args.mem, args.linear, linear) if requirements else [])
     selected = [m for m in options if is_selected(m)]
     has_custom_rates = show_custom and any(
         f in CUSTOM_LIMITS and (families is None or f in families) for r in scope for f in custom_rates.get(r, {})
@@ -747,12 +799,16 @@ def main(argv=None) -> int:
         # Rounded so that rounding noise in the listed prices doesn't reorder sizes of one type.
         return (round(core_price(m), 6),) + price_key(m)
 
+    def run_key(m):
+        # The hourly price without --linear; rounded like core_price_key.
+        return (round(run_price(m, m["hourly"], ref_cores), 6),) + price_key(m)
+
     def est_key(m):
         estimate = effective_price(m)
-        return (estimate if estimate is not None else math.inf,) + price_key(m)
+        return (run_price(m, estimate, ref_cores) if estimate is not None else math.inf,) + price_key(m)
 
-    sort_keys = {"name": name_key, "price": price_key, "core": core_price_key, "est": est_key}
-    sort = args.sort or ("price" if requirements else "name")
+    sort_keys = {"name": name_key, "price": price_key, "core": core_price_key, "run": run_key, "est": est_key}
+    sort = args.sort or ("run" if linear else "price" if requirements else "name")
     limit = args.limit if args.limit is not None else (10 if requirements else None)
 
     unchecked, hidden = [], []
@@ -760,11 +816,11 @@ def main(argv=None) -> int:
     if args.preemption:
         preemption_cache = {} if args.refresh else load_preemption_cache()
         if requirements:
-            # Check machines in order of hourly price, only as far as one could still win.
+            # Check machines in order of price (per run with --linear), only as far as one could still win.
             # Custom machine types are listed without a check: the API has no daily history for them.
-            candidates.sort(key=price_key)
+            candidates.sort(key=run_key)
             predefined = [m for m in candidates if m["type"] != "custom"]
-            checked, best_estimate = check_preemption(predefined, limit, preemption_cache)
+            checked, best_estimate = check_preemption(predefined, limit, preemption_cache, ref_cores)
             unchecked = predefined[checked:]
             skipped = {id(m) for m in unchecked}
             candidates = [m for m in candidates if id(m) not in skipped]
@@ -790,13 +846,13 @@ def main(argv=None) -> int:
 
     notes_shown = set()
     if candidates:
-        notes_shown |= print_machines(candidates[:limit], show_region=all_regions)
+        notes_shown |= print_machines(candidates[:limit], show_region=all_regions, ref_cores=ref_cores)
         more = len(hidden) + (max(0, len(candidates) - limit) if limit is not None else 0)
         if more:
             print(f"... {more} more (use -n to show more)")
-        if unchecked and unchecked[0]["hourly"] >= best_estimate:
+        if unchecked and run_price(unchecked[0], unchecked[0]["hourly"], ref_cores) >= best_estimate:
             print(f"... {len(unchecked)} more not checked for preemption: "
-                  "their hourly price is above the best estimated price")
+                  f"their {'price per run' if linear else 'hourly price'} is above the best estimated price")
         elif unchecked:
             print(f"... {len(unchecked)} more not checked for preemption (at most {MAX_PREEMPTION_QUERIES} "
                   "gcloud queries per run); a cheaper estimate may exist, narrow the selection with -f/-t")
@@ -820,34 +876,47 @@ def main(argv=None) -> int:
     highlighted = []
     best = min(candidates, key=price_key) if candidates else None
     if best:
-        safest = None
-        if args.preemption:
-            with_data = [m for m in candidates if has_preemption_data(m)]
-            safest = min(with_data, key=est_key) if with_data else None
-        also = ", also after preemption risk" if safest is best else ""
-        print(f"\nCheapest machine with {needs}{also}:")
-        print(f"  {describe(best, all_regions)}")
-        highlighted.append(best)
-        if safest is not None and safest is not best:
-            print("\nCheapest including preemption risk:")
-            print(f"  {describe(safest, all_regions)}")
-            highlighted.append(safest)
-        elif args.preemption and safest is None:
+        # (label, short label when merged into an earlier pick of the same machine, machine)
+        picks = [(f"Cheapest machine with {needs}", None, best)]
+        if linear:
+            picks.append((f"Cheapest per run, if the runtime scales linearly with cores up to {args.linear} vCPUs",
+                          "per run", min(candidates, key=run_key)))
+        with_data = [m for m in candidates if has_preemption_data(m)]
+        if with_data:
+            label = "Cheapest per run including preemption risk" if linear else "Cheapest including preemption risk"
+            picks.append((label, "after preemption risk", min(with_data, key=est_key)))
+        for i, (label, short, m) in enumerate(picks):
+            if any(m is earlier for _, _, earlier in picks[:i]):
+                continue
+            also = [s for _, s, later in picks[i + 1:] if later is m]
+            print(f"\n{label}" + (f", also {' and '.join(also)}" if also else "") + ":")
+            print(f"  {describe(m, all_regions, ref_cores)}")
+            if short == "per run" and m is not best:
+                saving = 1 - run_price(m, m["hourly"], ref_cores) / run_price(best, best["hourly"], ref_cores)
+                print(f"    {cores(m) / cores(best):.3g}x the cores of {best['name']} at "
+                      f"{m['hourly'] / best['hourly']:.2f}x the hourly price: {saving:.0%} cheaper per run")
+            highlighted.append(m)
+        if args.preemption and not with_data:
             print(f"\nNo checked machine has {PREEMPTION_MIN_DAYS}+ days of preemption data to rank by risk.")
 
     # Point out a cheaper option outside the selected families/types, if any.
     others = [m for m in options if not is_selected(m) and meets_requirements(m)]
-    alt = min(others, key=price_key) if others else None
-    if alt and (best is None or alt["hourly"] < best["hourly"]):
-        label = "Cheaper outside" if best else "Cheapest option outside"
-        print(f"\n{label} your selection (try -f all / -t all):")
-        print(f"  {describe(alt, all_regions)}")
+    alt = min(others, key=run_key) if others else None
+    top = min(candidates, key=run_key) if candidates else None
+    if alt and (top is None or run_key(alt)[0] < run_key(top)[0]):
+        label = ("Cheaper" if top else "Cheapest option") + (" per run" if linear else "")
+        print(f"\n{label} outside your selection (try -f all / -t all):")
+        print(f"  {describe(alt, all_regions, ref_cores)}")
         highlighted.append(alt)
-    elif best is None:
+    elif top is None:
         print("Try other regions (-r all).")
     print_legend(notes_shown | {note for m in highlighted for note in family_notes(m["family"])})
     if args.preemption:
         print(f"\n{PREEMPTION_LEGEND}")
+    if linear:
+        print("\n" + LINEAR_LEGEND.format(cpu=args.cpu, ref=ref_cores))
+        if args.preemption:
+            print("Est. USD/run-hour: the same for Est. USD/hour.")
     return 0 if candidates else 1
 
 
