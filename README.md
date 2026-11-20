@@ -20,7 +20,8 @@ Requires Python 3.9+, no extra packages.
 ./gcp_spot.py --cpu 16 -f all -r all           # cheapest 16+ vCPU machine in any pd-standard family/region
 ./gcp_spot.py --cpu 8 --mem 32 -f all -p       # include preemption risk (needs gcloud)
 ./gcp_spot.py --cpu 8 -f all --disk any        # also families without pd-standard (C3, N4, ...)
-./gcp_spot.py --cpu 8 -f all --disk pd-balanced --no-arm  # x86 families that work with Batch defaults
+./gcp_spot.py --cpu 8 -f all --disk pd-balanced  # families that work with Batch defaults
+./gcp_spot.py --cpu 8 -f all --arm             # include Arm families
 ./gcp_spot.py --list-regions
 ./gcp_spot.py --list-families -r europe-north1
 ```
@@ -32,7 +33,7 @@ Requires Python 3.9+, no extra packages.
 | `-t, --type` | `standard,highmem,highcpu,custom` | Comma-separated types, or `all` (adds `megamem`, `standard-lssd`, ...) |
 | `--no-hyperdisk` | | Leave out families without Persistent Disk support (see below) |
 | `--disk TYPE` | `pd-standard` | Only families that support boot disk `pd-standard`, `pd-balanced`, `pd-ssd` or `hyperdisk-balanced`; `any` for all families |
-| `--no-arm` | | Leave out Arm families (C4A, N4A, T2A) |
+| `--arm` | off | Include Arm families (C4A, N4A, T2A) |
 | `--cpu N` | | Minimum vCPUs |
 | `--mem GIB` | | Minimum memory in GiB |
 | `-p, --preemption` | | Fetch preemption history with gcloud and rank by estimated price including reruns |
@@ -58,10 +59,10 @@ The `Notes` column flags families that need extra setup in Google Batch:
   type to `hyperdisk-balanced`.
 
 By default only families that support `pd-standard` disks are shown, so Hyperdisk
-families only appear with `--disk any` or `--disk hyperdisk-balanced`. T2A (Arm)
-supports `pd-standard`; leave it out with `--no-arm`. `--no-hyperdisk` leaves out the
-Hyperdisk families even with `--disk any`. Filtered families are also left out of the
-"cheaper outside your selection" suggestion and `--list-families`.
+families only appear with `--disk any` or `--disk hyperdisk-balanced`. Arm families are
+left out unless you pass `--arm`. `--no-hyperdisk` leaves out the Hyperdisk families
+even with `--disk any`. Filtered families are also left out of the "cheaper outside
+your selection" suggestion and `--list-families`.
 
 `--disk TYPE` keeps only families that can use that disk type. The default is the
 cheaper (but slower, HDD-backed) `pd-standard`; every family that supports it also

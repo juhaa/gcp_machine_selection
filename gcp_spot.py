@@ -607,8 +607,8 @@ def parse_args(argv=None) -> argparse.Namespace:
             "  %(prog)s --cpu 8 -f all --disk any    also families without pd-standard (C3, N4, ...)\n"
             "  %(prog)s --list-families              show available families and types\n"
             "\n"
-            f"Only families that support {DEFAULT_DISK} disks are shown by default; --disk any shows\n"
-            "all families.\n"
+            f"By default only x86 families that support {DEFAULT_DISK} disks are shown; --disk any\n"
+            "and --arm show the others.\n"
             "\n"
             "Most families count each hyperthread as a vCPU (2 vCPUs = 1 core); T2D, T2A, C4A,\n"
             "N4A and H3 have one vCPU per physical core. USD/core/hour compares them fairly.\n"
@@ -631,8 +631,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--disk", choices=DISK_CHOICES, type=str.lower, default=DEFAULT_DISK,
                    help="only families that support this boot disk type, or 'any' "
                         f"(default: {DEFAULT_DISK}; Google Batch's default is pd-balanced)")
-    p.add_argument("--no-arm", action="store_true",
-                   help="leave out Arm families (C4A, N4A, T2A), which need arm64 container images")
+    p.add_argument("--arm", action="store_true",
+                   help="include Arm families (C4A, N4A, T2A), which need arm64 container images "
+                        "(left out by default)")
     p.add_argument("--cpu", type=int, metavar="N", help="minimum number of vCPUs needed")
     p.add_argument("--mem", type=float, metavar="GIB", help="minimum memory needed, in GiB")
     p.add_argument("-p", "--preemption", action="store_true",
@@ -663,7 +664,16 @@ def main(argv=None) -> int:
     def family_allowed(family):
         hyperdisk_only = args.no_hyperdisk and family in HYPERDISK_ONLY_FAMILIES
         unsupported_disk = args.disk and args.disk not in DISK_TYPES.get(family, ())
-        return not hyperdisk_only and not unsupported_disk and not (args.no_arm and family in ARM_FAMILIES)
+        unwanted_arm = not args.arm and family in ARM_FAMILIES
+        return not hyperdisk_only and not unsupported_disk and not unwanted_arm
+
+    # The families left by --disk and --arm, for messages: "x86 families with pd-standard support".
+    family_filter = None
+    if args.disk or not args.arm:
+        family_filter = "families" if args.arm else "x86 families"
+        if args.disk:
+            family_filter += f" with {args.disk} support"
+    widen = " and ".join((["--disk any"] if args.disk else []) + ([] if args.arm else ["--arm"]))
 
     custom_rates = {
         r: {family: rates for family, rates in by_family.items() if family_allowed(family)}
@@ -697,8 +707,8 @@ def main(argv=None) -> int:
         ]
         print_table(["Family", "Types", "1 vCPU =", "Notes"], rows, "llll")
         print_legend({note for family in types_by_family for note in family_notes(family)})
-        if args.disk:
-            print(f"\nOnly families that support {args.disk} disks are listed; --disk any lists all.")
+        if family_filter:
+            print(f"\nOnly {family_filter} are listed; use {widen} to list the others.")
         return 0
 
     families = None if "all" in args.family else args.family
@@ -719,7 +729,7 @@ def main(argv=None) -> int:
         f in CUSTOM_LIMITS and (families is None or f in families) for r in scope for f in custom_rates.get(r, {})
     )
     if not selected and not has_custom_rates:
-        hint = f" (only families that support {args.disk} disks; --disk any for all)" if args.disk else ""
+        hint = f" (only {family_filter}; use {widen} for the others)" if family_filter else ""
         sys.exit(f"error: no machine types match the selected region/families/types{hint}; see --list-families")
 
     candidates = [m for m in selected if meets_requirements(m)]
@@ -775,8 +785,8 @@ def main(argv=None) -> int:
 
     fetched = datetime.fromtimestamp(data["fetched"]).strftime("%Y-%m-%d %H:%M")
     where = "all regions" if all_regions else regions[region]
-    disk = f", families with {args.disk} support" if args.disk else ""
-    print(f"Spot VM prices, {where}{disk} (fetched {fetched})\n")
+    shown = f", {family_filter}" if family_filter else ""
+    print(f"Spot VM prices, {where}{shown} (fetched {fetched})\n")
 
     notes_shown = set()
     if candidates:
